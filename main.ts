@@ -10,12 +10,14 @@ bot.command("start", (ctx) => ctx.reply("👋 Send me a prompt to generate an im
 bot.on("message:text", async (ctx) => {
   const prompt = ctx.message.text.trim();
   const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
+
   try {
     await ctx.replyWithPhoto(imageUrl, {
       caption: `🖼️ Prompt: "${prompt}"`,
     });
-  } catch {
-    await ctx.reply("⚠️ Failed to generate image. Try again.");
+  } catch (err) {
+    console.error("❌ Image send failed:", err);
+    await ctx.reply("⚠️ Couldn't generate image. Try a different prompt.");
   }
 });
 
@@ -24,7 +26,8 @@ Deno.serve(async (req) => {
     const update = await req.json();
     await bot.handleUpdate(update);
     return new Response("ok");
-  } catch {
+  } catch (err) {
+    console.error("❌ Update handling failed:", err);
     return new Response("Invalid update", { status: 400 });
   }
 });
