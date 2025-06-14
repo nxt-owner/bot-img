@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "start": "deno run --allow-env --allow-net --allow-read bot.ts"
+  },
+  "imports": {
+    "telegraf": "npm:telegraf@4.12.2",
+    "axios": "npm:axios@1.6.2"
+  },
+  "nodeModulesDir": "auto"
+}
