@@ -1,6 +1,6 @@
 import { Telegraf, Markup } from "npm:telegraf@4.12.2";
 
-// Style configuration
+// Styles configuration
 const styles = [
   {
     id: 'none',
@@ -25,117 +25,138 @@ const styles = [
     name: 'Digital Art',
     preview: 'https://fineartshippers.com/wp-content/uploads/2024/12/digital-art-and-artificial-intelligence.png',
     promptPrefix: 'digital art, concept art, intricate details, '
-  }
+  },
 ];
 
-// Environment
+// Get bot token and webhook from env (set in Deno Deploy)
 const botToken = Deno.env.get("BOT_TOKEN");
-const webhookUrl = Deno.env.get("WEBHOOK_URL");
+const WEBHOOK_URL = Deno.env.get("WEBHOOK_URL");
+const PORT = Deno.env.get("PORT") || 3000;
 
 if (!botToken) {
-  console.error("ERROR: BOT_TOKEN not set");
-  Deno.exit(1);
+  throw new Error("❌ BOT_TOKEN environment variable is missing.");
 }
 
 const bot = new Telegraf(botToken);
-const userSessions = new Map<number, { prompt: string; currentStyleIndex: number }>();
+
+// User sessions storage
+const userSessions = new Map();
 
 // Start command
 bot.start((ctx) => {
-  ctx.reply(
-    "🎨 Welcome to AI Image Generator!\n\nIn private chat: Just send your prompt\nIn groups: Use /gen [prompt]",
-    Markup.keyboard([["Generate Random Image"]]).resize()
+  return ctx.reply(
+    "🎨 Welcome to AI Image Generator!\n\n" +
+    "In private chat: Just send your prompt\n" +
+    "In groups: Use /gen [prompt]\n\n" +
+    "🖼️ Choose from different art styles!",
+    Markup.keyboard([['Generate Random Image']]).resize()
   );
 });
 
-// Handle /gen in groups
-bot.command("gen", async (ctx) => {
-  if (ctx.chat.type === "private") {
-    return ctx.reply("Just send your prompt directly in private chat.");
+// Handle /gen command in groups
+bot.command('gen', async (ctx) => {
+  if (ctx.chat.type === 'private') {
+    return ctx.reply("In private chat, just send your prompt directly (no /gen needed)");
   }
-  const prompt = ctx.message.text.replace("/gen", "").trim();
-  if (!prompt) return ctx.reply("Please provide a prompt. Example: /gen a mountain landscape");
+
+  const prompt = ctx.message.text.replace('/gen', '').trim();
+
+  if (!prompt) {
+    return ctx.reply('Please provide a prompt after /gen\nExample: /gen a beautiful landscape');
+  }
+
   await processPrompt(ctx, prompt);
 });
 
-// Text input
-bot.on("text", async (ctx) => {
-  if (ctx.message.text === "Generate Random Image") {
+// Handle all text messages
+bot.on('text', async (ctx) => {
+  if (ctx.chat.type !== 'private' && !ctx.message.reply_to_message) return;
+
+  if (ctx.message.text === 'Generate Random Image') {
     const randomPrompts = [
       "a futuristic city at night",
       "a magical forest with glowing plants",
       "a cute robot pet playing in the park",
       "an underwater kingdom with mermaids",
-      "a steampunk airship flying through clouds",
+      "a steampunk airship flying through clouds"
     ];
     const randomPrompt = randomPrompts[Math.floor(Math.random() * randomPrompts.length)];
-    return await processPrompt(ctx, randomPrompt);
+    await processPrompt(ctx, randomPrompt);
+    return;
   }
-  if (ctx.chat.type !== "private" && !ctx.message.reply_to_message) return;
+
   await processPrompt(ctx, ctx.message.text);
 });
 
-// Reply input
-bot.on("message", async (ctx) => {
+// Handle replies to bot messages
+bot.on('message', async (ctx) => {
   if (ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id) {
     await processPrompt(ctx, ctx.message.text);
   }
 });
 
+// Common function to process prompts
 async function processPrompt(ctx: any, prompt: string) {
   const userId = ctx.from.id;
-  userSessions.set(userId, { prompt, currentStyleIndex: 0 });
+  userSessions.set(userId, {
+    currentStyleIndex: 0,
+    prompt: prompt
+  });
   await showStyleSelection(ctx, userId);
 }
 
+// Style selection handler
 async function showStyleSelection(ctx: any, userId: number) {
   const session = userSessions.get(userId);
-  if (!session) return;
+  if (!session || !session.prompt) return;
 
   const style = styles[session.currentStyleIndex];
   const keyboard = Markup.inlineKeyboard([
     [
-      Markup.button.callback("◀️ Prev", "prev_style"),
-      Markup.button.callback("Next ▶️", "next_style"),
+      Markup.button.callback('◀️ Prev', 'prev_style'),
+      Markup.button.callback('Next ▶️', 'next_style')
     ],
-    [Markup.button.callback(`Generate with ${style.name}`, `generate_${style.id}`)],
+    [Markup.button.callback(`Generate with ${style.name}`, `generate_${style.id}`)]
   ]);
 
   try {
     await ctx.replyWithPhoto(style.preview, {
       caption: `Style: ${style.name}\nPrompt: ${session.prompt}`,
-      ...keyboard,
+      ...keyboard
     });
-  } catch {
+  } catch (error) {
+    console.error("Preview image error:", error);
     await ctx.reply(`Style: ${style.name}\nPrompt: ${session.prompt}`, keyboard);
   }
 }
 
+// Navigation handlers
 bot.action(/prev_style|next_style/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
 
   const session = userSessions.get(userId)!;
-  session.currentStyleIndex += ctx.match[0] === "next_style" ? 1 : -1;
+  session.currentStyleIndex += ctx.match[0] === 'next_style' ? 1 : -1;
 
   if (session.currentStyleIndex >= styles.length) session.currentStyleIndex = 0;
   if (session.currentStyleIndex < 0) session.currentStyleIndex = styles.length - 1;
 
-  await ctx.deleteMessage().catch(() => {});
+  await ctx.deleteMessage().catch(console.error);
   await showStyleSelection(ctx, userId);
 });
 
+// Image generation handler
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
 
+  const style = styles.find(s => s.id === ctx.match[1]);
   const session = userSessions.get(userId)!;
-  const style = styles.find((s) => s.id === ctx.match[1]);
-  if (!style) return;
+  if (!style || !session.prompt) return;
 
   try {
-    await ctx.replyWithChatAction("upload_photo");
-    const loadingMsg = await ctx.reply("🔄 Generating your image...");
+    await ctx.replyWithChatAction('upload_photo');
+    const processingMsg = await ctx.reply("🔄 Generating your image...");
 
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=512&height=512`;
@@ -143,40 +164,48 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
 
-    const response = await fetch(apiUrl, { signal: controller.signal });
+    const response = await fetch(apiUrl, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'TelegramBot/1.0' }
+    });
     clearTimeout(timeout);
 
-    if (!response.ok) throw new Error("Failed to fetch image");
+    if (!response.ok) {
+      throw new Error(`API responded with status ${response.status}`);
+    }
 
     const imageBuffer = await response.arrayBuffer();
     const imageBytes = new Uint8Array(imageBuffer);
-    const binary = String.fromCharCode(...imageBytes);
+    let binary = '';
+    imageBytes.forEach(byte => binary += String.fromCharCode(byte));
     const base64Image = btoa(binary);
     const photoUrl = `data:image/jpeg;base64,${base64Image}`;
 
-    await ctx.replyWithPhoto(photoUrl, {
-      caption: style.id === "none"
-        ? `🖼️ "${session.prompt}"`
-        : `🎨 ${style.name} Style\n"${session.prompt}"`,
-    });
+    await ctx.replyWithPhoto(
+      photoUrl,
+      {
+        caption: style.id === 'none'
+          ? `🖼️ "${session.prompt}"`
+          : `🎨 ${style.name} Style\n"${session.prompt}"`
+      }
+    );
 
-    await ctx.deleteMessage(loadingMsg.message_id).catch(() => {});
-  } catch (e) {
-    console.error(e);
-    await ctx.reply("❌ Failed to generate image. Try again shortly.");
+    await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
+
+  } catch (error) {
+    console.error("Generation error:", error);
+    await ctx.reply("❌ Failed to generate image. Please try again later.");
   }
 });
 
-// Deploy via webhook on Deno Deploy
-if (webhookUrl) {
-  bot.telegram.setWebhook(`${webhookUrl}/bot${botToken}`);
-  bot.startWebhook(`/bot${botToken}`);
-  console.log("Bot running with webhook on Deno Deploy");
+// Launch bot
+if (WEBHOOK_URL) {
+  console.log("🚀 Starting bot in webhook mode...");
+  bot.telegram.setWebhook(`${WEBHOOK_URL}/bot${botToken}`);
+  bot.startWebhook(`/bot${botToken}`, null, +PORT);
 } else {
-  bot.launch().then(() => console.log("Bot running with polling (local)"));
+  console.log("🚀 Starting bot in long polling mode...");
+  bot.launch()
+    .then(() => console.log("✅ Bot is running!"))
+    .catch(err => console.error("❌ Launch failed:", err));
 }
-
-Deno.addSignalListener("SIGINT", () => {
-  console.log("Shutting down bot...");
-  bot.stop();
-});
