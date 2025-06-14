@@ -1,5 +1,4 @@
 import { Telegraf, Markup } from "npm:telegraf@4.12.2";
-import { rateLimit } from "npm:telegraf-ratelimit@2.0.0";
 
 // Styles configuration
 const styles = [
@@ -37,14 +36,26 @@ if (!botToken) {
 
 const bot = new Telegraf(botToken);
 
-// Rate limiting configuration
-const limitConfig = {
-  window: 1000, // 1 second
-  limit: 1, // 1 message per second
-  onLimitExceeded: (ctx: any) => ctx.reply("⚠️ Please wait a moment before making another request"),
-  keyGenerator: (ctx: any) => ctx.from?.id || ctx.chat?.id // Limit per user/chat
-};
-bot.use(rateLimit(limitConfig));
+// Simple rate limiting implementation
+const userLastRequest = new Map<number, number>();
+const RATE_LIMIT_WINDOW = 5000; // 5 seconds
+const RATE_LIMIT_MESSAGE = "⚠️ Please wait 5 seconds between requests";
+
+// Rate limiting middleware
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id;
+  if (!userId) return next();
+
+  const now = Date.now();
+  const lastRequest = userLastRequest.get(userId) || 0;
+
+  if (now - lastRequest < RATE_LIMIT_WINDOW) {
+    return ctx.reply(RATE_LIMIT_MESSAGE);
+  }
+
+  userLastRequest.set(userId, now);
+  return next();
+});
 
 // User sessions storage
 const userSessions = new Map();
@@ -59,13 +70,103 @@ bot.start((ctx) => {
     "🎨 Welcome to AI Image Generator!\n\n" +
     "In private chat: Just send your prompt\n" +
     "In groups: Use /gen [prompt]\n\n" +
-    "⚠️ Please note: You can generate 1 image every few seconds",
+    "⚠️ Please note: You can generate 1 image every 5 seconds",
     Markup.keyboard([['Generate Random Image']])
       .resize()
   );
 });
 
-// [Previous command and message handlers remain the same...]
+// Handle /gen command in groups
+bot.command('gen', async (ctx) => {
+  if (ctx.chat.type === 'private') {
+    return ctx.reply("In private chat, just send your prompt directly (no /gen needed)");
+  }
+
+  const prompt = ctx.message.text.replace('/gen', '').trim();
+  
+  if (!prompt) {
+    return ctx.reply('Please provide a prompt after /gen\nExample: /gen a beautiful landscape');
+  }
+
+  await processPrompt(ctx, prompt);
+});
+
+// Handle all text messages
+bot.on('text', async (ctx) => {
+  if (ctx.chat.type !== 'private' && !ctx.message.reply_to_message) return;
+
+  if (ctx.message.text === 'Generate Random Image') {
+    const randomPrompts = [
+      "a futuristic city at night",
+      "a magical forest with glowing plants",
+      "a cute robot pet playing in the park",
+      "an underwater kingdom with mermaids",
+      "a steampunk airship flying through clouds"
+    ];
+    const randomPrompt = randomPrompts[Math.floor(Math.random() * randomPrompts.length)];
+    await processPrompt(ctx, randomPrompt);
+    return;
+  }
+
+  await processPrompt(ctx, ctx.message.text);
+});
+
+// Handle replies to bot messages
+bot.on('message', async (ctx) => {
+  if (ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id) {
+    await processPrompt(ctx, ctx.message.text);
+  }
+});
+
+// Common function to process prompts
+async function processPrompt(ctx: any, prompt: string) {
+  const userId = ctx.from.id;
+  userSessions.set(userId, {
+    currentStyleIndex: 0,
+    prompt: prompt
+  });
+  await showStyleSelection(ctx, userId);
+}
+
+// Style selection handler
+async function showStyleSelection(ctx: any, userId: number) {
+  const session = userSessions.get(userId);
+  if (!session || !session.prompt) return;
+
+  const style = styles[session.currentStyleIndex];
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('◀️ Prev', 'prev_style'),
+      Markup.button.callback('Next ▶️', 'next_style')
+    ],
+    [Markup.button.callback(`Generate with ${style.name}`, `generate_${style.id}`)]
+  ]);
+
+  try {
+    await ctx.replyWithPhoto(style.preview, {
+      caption: `Style: ${style.name}\nPrompt: ${session.prompt}`,
+      ...keyboard
+    });
+  } catch (error) {
+    console.error("Preview image error:", error);
+    await ctx.reply(`Style: ${style.name}\nPrompt: ${session.prompt}`, keyboard);
+  }
+}
+
+// Navigation handlers
+bot.action(/prev_style|next_style/, async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId || !userSessions.has(userId)) return;
+
+  const session = userSessions.get(userId)!;
+  session.currentStyleIndex += ctx.match[0] === 'next_style' ? 1 : -1;
+  
+  if (session.currentStyleIndex >= styles.length) session.currentStyleIndex = 0;
+  if (session.currentStyleIndex < 0) session.currentStyleIndex = styles.length - 1;
+
+  await ctx.deleteMessage().catch(console.error);
+  await showStyleSelection(ctx, userId);
+});
 
 // Image generation handler with retry logic
 bot.action(/generate_(\w+)/, async (ctx) => {
@@ -73,7 +174,7 @@ bot.action(/generate_(\w+)/, async (ctx) => {
   if (!userId || !userSessions.has(userId)) return;
 
   const style = styles.find(s => s.id === ctx.match[1]);
-  const session = userSessions.get(userId);
+  const session = userSessions.get(userId)!;
   if (!style || !session.prompt) return;
 
   try {
@@ -83,61 +184,42 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=512&height=512`;
 
-    // Retry logic with exponential backoff
-    let retries = 3;
-    let lastError;
+    // Fetch with timeout
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     
-    while (retries > 0) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
-        
-        const response = await fetch(apiUrl, { 
-          signal: controller.signal,
-          headers: { 'User-Agent': 'TelegramBot/1.0' }
-        });
-        clearTimeout(timeout);
+    const response = await fetch(apiUrl, { 
+      signal: controller.signal,
+      headers: { 'User-Agent': 'TelegramBot/1.0' }
+    });
+    clearTimeout(timeout);
 
-        if (!response.ok) {
-          throw new Error(`API responded with status ${response.status}`);
-        }
-
-        const imageBuffer = await response.arrayBuffer();
-        const imageBytes = new Uint8Array(imageBuffer);
-
-        // Convert to base64 URL
-        let binary = '';
-        imageBytes.forEach(byte => binary += String.fromCharCode(byte));
-        const base64Image = btoa(binary);
-        const photoUrl = `data:image/jpeg;base64,${base64Image}`;
-
-        await ctx.replyWithPhoto(
-          photoUrl,
-          { 
-            caption: style.id === 'none' 
-              ? `🖼️ "${session.prompt}"`
-              : `🎨 ${style.name} Style\n"${session.prompt}"`
-          }
-        );
-
-        await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
-        return; // Success - exit the function
-
-      } catch (error) {
-        lastError = error;
-        retries--;
-        if (retries > 0) {
-          const delay = Math.pow(2, 3 - retries) * 1000; // Exponential backoff
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-      }
+    if (!response.ok) {
+      throw new Error(`API responded with status ${response.status}`);
     }
 
-    throw lastError; // All retries failed
+    // Convert to base64 URL
+    const imageBuffer = await response.arrayBuffer();
+    const imageBytes = new Uint8Array(imageBuffer);
+    let binary = '';
+    imageBytes.forEach(byte => binary += String.fromCharCode(byte));
+    const base64Image = btoa(binary);
+    const photoUrl = `data:image/jpeg;base64,${base64Image}`;
+
+    await ctx.replyWithPhoto(
+      photoUrl,
+      { 
+        caption: style.id === 'none' 
+          ? `🖼️ "${session.prompt}"`
+          : `🎨 ${style.name} Style\n"${session.prompt}"`
+      }
+    );
+
+    await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
 
   } catch (error) {
     console.error("Generation error:", error);
-    await ctx.reply("❌ Failed to generate image after several attempts. Please try again later.");
+    await ctx.reply("❌ Failed to generate image. Please try again in a moment.");
   }
 });
 
