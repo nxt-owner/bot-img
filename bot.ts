@@ -147,7 +147,7 @@ bot.action(/prev_style|next_style/, async (ctx) => {
   await showStyleSelection(ctx, userId);
 });
 
-// Image generation handler - NO TEMP FILES
+// Image generation handler - Fixed version
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
@@ -163,15 +163,23 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}`;
 
-    // Fetch image directly without temp files
+    // Fetch image as blob
     const response = await fetch(apiUrl);
     if (!response.ok) throw new Error("Failed to fetch image");
-
-    const imageBuffer = await response.arrayBuffer();
     
-    // Send photo directly from memory
+    // Convert to ReadableStream
+    const imageBlob = await response.blob();
+    const imageStream = imageBlob.stream();
+    
+    // Create file-like object for Telegraf
+    const file = {
+      source: imageStream,
+      filename: 'generated-image.jpg'
+    };
+
+    // Send photo with proper file handling
     await ctx.replyWithPhoto(
-      { source: new Uint8Array(imageBuffer) },
+      file,
       { 
         caption: style.id === 'none' 
           ? `🖼️ "${session.prompt}"`
