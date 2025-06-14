@@ -1,6 +1,0 @@
-{
-  "devDependencies": {
-    "@types/axios": "^0.14.4",
-    "@types/node": "^24.0.1"
-  }
-}
