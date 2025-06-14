@@ -57,97 +57,9 @@ bot.start((ctx) => {
   );
 });
 
-// Handle /gen command in groups
-bot.command('gen', async (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply("In private chat, just send your prompt directly (no /gen needed)");
-  }
+// [Keep all your existing command and message handlers...]
 
-  const prompt = ctx.message.text.replace('/gen', '').trim();
-  if (!prompt) {
-    return ctx.reply('Please provide a prompt after /gen\nExample: /gen a beautiful landscape');
-  }
-  await processPrompt(ctx, prompt);
-});
-
-// Handle all text messages
-bot.on('text', async (ctx) => {
-  if (ctx.chat.type !== 'private' && !ctx.message.reply_to_message) return;
-
-  if (ctx.message.text === 'Generate Random Image') {
-    const randomPrompts = [
-      "a futuristic city at night",
-      "a magical forest with glowing plants",
-      "a cute robot pet playing in the park",
-      "an underwater kingdom with mermaids",
-      "a steampunk airship flying through clouds"
-    ];
-    const randomPrompt = randomPrompts[Math.floor(Math.random() * randomPrompts.length)];
-    await processPrompt(ctx, randomPrompt);
-    return;
-  }
-
-  await processPrompt(ctx, ctx.message.text);
-});
-
-// Handle replies to bot messages
-bot.on('message', async (ctx) => {
-  if (ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id) {
-    await processPrompt(ctx, ctx.message.text);
-  }
-});
-
-// Common function to process prompts
-async function processPrompt(ctx: any, prompt: string) {
-  const userId = ctx.from.id;
-  userSessions.set(userId, {
-    currentStyleIndex: 0,
-    prompt: prompt
-  });
-  await showStyleSelection(ctx, userId);
-}
-
-// Style selection handler
-async function showStyleSelection(ctx: any, userId: number) {
-  const session = userSessions.get(userId);
-  if (!session || !session.prompt) return;
-
-  const style = styles[session.currentStyleIndex];
-  const keyboard = Markup.inlineKeyboard([
-    [
-      Markup.button.callback('◀️ Prev', 'prev_style'),
-      Markup.button.callback('Next ▶️', 'next_style')
-    ],
-    [Markup.button.callback(`Generate with ${style.name}`, `generate_${style.id}`)]
-  ]);
-
-  try {
-    await ctx.replyWithPhoto(style.preview, {
-      caption: `Style: ${style.name}\nPrompt: ${session.prompt}`,
-      ...keyboard
-    });
-  } catch (error) {
-    console.error("Preview image error:", error);
-    await ctx.reply(`Style: ${style.name}\nPrompt: ${session.prompt}`, keyboard);
-  }
-}
-
-// Navigation handlers
-bot.action(/prev_style|next_style/, async (ctx) => {
-  const userId = ctx.from?.id;
-  if (!userId || !userSessions.has(userId)) return;
-
-  const session = userSessions.get(userId)!;
-  session.currentStyleIndex += ctx.match[0] === 'next_style' ? 1 : -1;
-  
-  if (session.currentStyleIndex >= styles.length) session.currentStyleIndex = 0;
-  if (session.currentStyleIndex < 0) session.currentStyleIndex = styles.length - 1;
-
-  await ctx.deleteMessage().catch(console.error);
-  await showStyleSelection(ctx, userId);
-});
-
-// Image generation handler - Fixed version
+// Fixed Image Generation Handler
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
@@ -163,23 +75,21 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}`;
 
-    // Fetch image as blob
+    // Fetch image as ArrayBuffer
     const response = await fetch(apiUrl);
     if (!response.ok) throw new Error("Failed to fetch image");
     
-    // Convert to ReadableStream
-    const imageBlob = await response.blob();
-    const imageStream = imageBlob.stream();
-    
-    // Create file-like object for Telegraf
-    const file = {
-      source: imageStream,
-      filename: 'generated-image.jpg'
-    };
+    // Convert to Buffer
+    const imageBuffer = await response.arrayBuffer();
+    const buffer = new Uint8Array(imageBuffer);
 
-    // Send photo with proper file handling
+    // Convert to base64
+    const base64Image = btoa(String.fromCharCode(...buffer));
+    const photoUrl = `data:image/jpeg;base64,${base64Image}`;
+
+    // Send photo using URL
     await ctx.replyWithPhoto(
-      file,
+      photoUrl,
       { 
         caption: style.id === 'none' 
           ? `🖼️ "${session.prompt}"`
