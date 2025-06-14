@@ -1,4 +1,5 @@
 import { Telegraf, Markup } from "npm:telegraf@4.12.2";
+import { rateLimit } from "npm:telegraf-ratelimit@2.0.0";
 
 // Styles configuration
 const styles = [
@@ -36,6 +37,15 @@ if (!botToken) {
 
 const bot = new Telegraf(botToken);
 
+// Rate limiting configuration
+const limitConfig = {
+  window: 1000, // 1 second
+  limit: 1, // 1 message per second
+  onLimitExceeded: (ctx: any) => ctx.reply("⚠️ Please wait a moment before making another request"),
+  keyGenerator: (ctx: any) => ctx.from?.id || ctx.chat?.id // Limit per user/chat
+};
+bot.use(rateLimit(limitConfig));
+
 // User sessions storage
 const userSessions = new Map();
 
@@ -48,15 +58,16 @@ bot.start((ctx) => {
   return ctx.reply(
     "🎨 Welcome to AI Image Generator!\n\n" +
     "In private chat: Just send your prompt\n" +
-    "In groups: Use /gen [prompt]",
+    "In groups: Use /gen [prompt]\n\n" +
+    "⚠️ Please note: You can generate 1 image every few seconds",
     Markup.keyboard([['Generate Random Image']])
       .resize()
   );
 });
 
-// [Previous command handlers remain the same...]
+// [Previous command and message handlers remain the same...]
 
-// Fixed Image Generation Handler
+// Image generation handler with retry logic
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
@@ -72,55 +83,61 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=512&height=512`;
 
-    // Fetch with timeout and retry logic
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    // Retry logic with exponential backoff
+    let retries = 3;
+    let lastError;
     
-    const response = await fetch(apiUrl, { 
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'TelegramBot (Deno Deploy)'
-      }
-    });
-    clearTimeout(timeout);
+    while (retries > 0) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        
+        const response = await fetch(apiUrl, { 
+          signal: controller.signal,
+          headers: { 'User-Agent': 'TelegramBot/1.0' }
+        });
+        clearTimeout(timeout);
 
-    if (!response.ok) {
-      throw new Error(`API responded with status ${response.status}`);
+        if (!response.ok) {
+          throw new Error(`API responded with status ${response.status}`);
+        }
+
+        const imageBuffer = await response.arrayBuffer();
+        const imageBytes = new Uint8Array(imageBuffer);
+
+        // Convert to base64 URL
+        let binary = '';
+        imageBytes.forEach(byte => binary += String.fromCharCode(byte));
+        const base64Image = btoa(binary);
+        const photoUrl = `data:image/jpeg;base64,${base64Image}`;
+
+        await ctx.replyWithPhoto(
+          photoUrl,
+          { 
+            caption: style.id === 'none' 
+              ? `🖼️ "${session.prompt}"`
+              : `🎨 ${style.name} Style\n"${session.prompt}"`
+          }
+        );
+
+        await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
+        return; // Success - exit the function
+
+      } catch (error) {
+        lastError = error;
+        retries--;
+        if (retries > 0) {
+          const delay = Math.pow(2, 3 - retries) * 1000; // Exponential backoff
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
 
-    // Convert to buffer
-    const imageBuffer = await response.arrayBuffer();
-    const imageBytes = new Uint8Array(imageBuffer);
-
-    // Convert to base64 URL
-    let binary = '';
-    imageBytes.forEach(byte => binary += String.fromCharCode(byte));
-    const base64Image = btoa(binary);
-    const photoUrl = `data:image/jpeg;base64,${base64Image}`;
-
-    // Send photo using URL
-    await ctx.replyWithPhoto(
-      photoUrl,
-      { 
-        caption: style.id === 'none' 
-          ? `🖼️ "${session.prompt}"`
-          : `🎨 ${style.name} Style\n"${session.prompt}"`
-      }
-    );
-
-    await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
+    throw lastError; // All retries failed
 
   } catch (error) {
     console.error("Generation error:", error);
-    await ctx.reply("❌ Failed to generate image. The server might be busy. Please try again in a moment.");
-    
-    // Additional error details for debugging
-    if (error instanceof Error) {
-      console.error("Error details:", {
-        message: error.message,
-        stack: error.stack
-      });
-    }
+    await ctx.reply("❌ Failed to generate image after several attempts. Please try again later.");
   }
 });
 
