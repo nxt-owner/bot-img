@@ -1,6 +1,6 @@
 import { Telegraf, Markup } from "npm:telegraf@4.12.2";
 
-// Styles configuration
+// Styles configuration 
 const styles = [
   {
     id: 'none',
