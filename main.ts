@@ -8,18 +8,25 @@ const bot = new Telegraf(BOT_TOKEN);
 bot.start((ctx) => ctx.reply("👋 Send me a prompt to generate an image!"));
 
 bot.on("text", async (ctx) => {
-  const prompt = ctx.message.text;
+  const prompt = ctx.message.text.trim();
   const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
 
-  await ctx.replyWithPhoto({ url: imageUrl }, { caption: `🖼️ Prompt: "${prompt}"` });
+  try {
+    await ctx.replyWithPhoto(imageUrl, {
+      caption: `🖼️ Prompt: "${prompt}"`,
+    });
+  } catch (err) {
+    console.error("Image sending failed:", err);
+    await ctx.reply("⚠️ Failed to send image. Try a different prompt.");
+  }
 });
 
 Deno.serve(async (req) => {
   try {
-    const { pathname, searchParams } = new URL(req.url);
-    if (pathname === "/") return new Response("Bot is running");
-    return await bot.handleUpdate(await req.json(), req);
-  } catch (_) {
+    const update = await req.json();
+    await bot.handleUpdate(update);
+    return new Response("ok");
+  } catch {
     return new Response("Invalid request", { status: 400 });
   }
 });
