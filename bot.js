@@ -1,7 +1,4 @@
-const { Telegraf, Markup } = require('telegraf');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
+import { Telegraf, Markup } from "npm:telegraf@4.12.2";
 
 // Styles configuration
 const styles = [
@@ -34,13 +31,17 @@ const styles = [
 const botToken = "7778560460:AAE8K1DHUDeu1x4xhzGiFuHNHtvLaOi-i7k";
 if (!botToken) {
   console.error("ERROR: Missing TELEGRAM_BOT_TOKEN");
-  process.exit(1);
+  Deno.exit(1);
 }
 
 const bot = new Telegraf(botToken);
 
 // User sessions storage
 const userSessions = new Map();
+
+// Webhook setup for Deno Deploy
+const PORT = Deno.env.get("PORT") || 3000;
+const WEBHOOK_URL = Deno.env.get("WEBHOOK_URL");
 
 // Start command
 bot.start((ctx) => {
@@ -145,7 +146,7 @@ bot.action(/prev_style|next_style/, async (ctx) => {
   await showStyleSelection(ctx, userId);
 });
 
-// Image generation handler
+// Image generation handler - No temp files
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
@@ -161,18 +162,20 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}`;
 
-    const response = await axios({
-      method: 'get',
-      url: apiUrl,
-      responseType: 'arraybuffer'
-    });
+    // Fetch image directly
+    const response = await fetch(apiUrl);
+    if (!response.ok) throw new Error("Failed to fetch image");
 
-    // Create a temporary file path
-    const tempFilePath = path.join(__dirname, 'temp-image.jpg');
-    fs.writeFileSync(tempFilePath, response.data);
+    // Convert to buffer and send directly
+    const imageBuffer = await response.arrayBuffer();
+    const imageBytes = new Uint8Array(imageBuffer);
+    
+    // Create a Blob
+    const blob = new Blob([imageBytes], { type: 'image/jpeg' });
+    const file = { source: blob, filename: 'generated-image.jpg' };
 
     await ctx.replyWithPhoto(
-      { source: tempFilePath },
+      file,
       { 
         caption: style.id === 'none' 
           ? `🖼️ "${session.prompt}"`
@@ -181,7 +184,6 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     );
 
     await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
-    fs.unlinkSync(tempFilePath); // Clean up the temporary file
 
   } catch (error) {
     console.error("Generation error:", error);
@@ -189,21 +191,21 @@ bot.action(/generate_(\w+)/, async (ctx) => {
   }
 });
 
-// Start the bot
-console.log("Starting bot...");
-bot.launch()
-  .then(() => console.log("Bot is running"))
-  .catch(err => console.error("Bot failed:", err));
+// Start the bot with webhook if in production
+if (WEBHOOK_URL) {
+  console.log("Starting bot in webhook mode...");
+  bot.telegram.setWebhook(`${WEBHOOK_URL}/bot${botToken}`);
+  bot.startWebhook(`/bot${botToken}`, null, PORT);
+} else {
+  console.log("Starting bot in polling mode...");
+  bot.launch()
+    .then(() => console.log("Bot is running"))
+    .catch(err => console.error("Bot failed:", err));
+}
 
 // Graceful shutdown
-process.once('SIGINT', () => {
+Deno.addSignalListener("SIGINT", () => {
   console.log("\nShutting down...");
   bot.stop();
-  process.exit();
-});
-
-process.once('SIGTERM', () => {
-  console.log("\nShutting down...");
-  bot.stop();
-  process.exit();
+  Deno.exit();
 });
