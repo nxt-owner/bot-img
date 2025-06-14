@@ -1,5 +1,4 @@
 import { Telegraf, Markup } from "telegraf";
-import axios from "axios";
 
 // Styles configuration
 const styles = [
@@ -27,7 +26,6 @@ const styles = [
     preview: 'https://fineartshippers.com/wp-content/uploads/2024/12/digital-art-and-artificial-intelligence.png',
     promptPrefix: 'digital art, concept art, intricate details, '
   },
- 
 ];
 
 const botToken = "7778560460:AAE8K1DHUDeu1x4xhzGiFuHNHtvLaOi-i7k";
@@ -44,6 +42,10 @@ const userSessions = new Map<number, {
   prompt?: string;
 }>();
 
+// Webhook setup for Deno Deploy
+const PORT = Deno.env.get("PORT") || 3000;
+const WEBHOOK_URL = Deno.env.get("WEBHOOK_URL");
+
 // Start command
 bot.start((ctx) => {
   return ctx.reply(
@@ -57,26 +59,21 @@ bot.start((ctx) => {
 
 // Handle /gen command in groups
 bot.command('gen', async (ctx) => {
-  // Only work in groups
   if (ctx.chat.type === 'private') {
     return ctx.reply("In private chat, just send your prompt directly (no /gen needed)");
   }
 
   const prompt = ctx.message.text.replace('/gen', '').trim();
-  
   if (!prompt) {
     return ctx.reply('Please provide a prompt after /gen\nExample: /gen a beautiful landscape');
   }
-
   await processPrompt(ctx, prompt);
 });
 
 // Handle all text messages
 bot.on('text', async (ctx) => {
-  // Ignore messages in groups that aren't commands or replies
   if (ctx.chat.type !== 'private' && !ctx.message.reply_to_message) return;
 
-  // Handle the "Generate Random Image" button
   if (ctx.message.text === 'Generate Random Image') {
     const randomPrompts = [
       "a futuristic city at night",
@@ -90,7 +87,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Process normal prompts in private chat or replies
   await processPrompt(ctx, ctx.message.text);
 });
 
@@ -151,7 +147,7 @@ bot.action(/prev_style|next_style/, async (ctx) => {
   await showStyleSelection(ctx, userId);
 });
 
-// Image generation handler
+// Image generation handler - NO TEMP FILES
 bot.action(/generate_(\w+)/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId || !userSessions.has(userId)) return;
@@ -167,17 +163,15 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     const fullPrompt = style.promptPrefix + session.prompt;
     const apiUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}`;
 
+    // Fetch image directly without temp files
     const response = await fetch(apiUrl);
     if (!response.ok) throw new Error("Failed to fetch image");
 
     const imageBuffer = await response.arrayBuffer();
-    const imageBytes = new Uint8Array(imageBuffer);
-
-    const tempFile = await Deno.makeTempFile({ suffix: ".jpg" });
-    await Deno.writeFile(tempFile, imageBytes);
-
+    
+    // Send photo directly from memory
     await ctx.replyWithPhoto(
-      { source: tempFile },
+      { source: new Uint8Array(imageBuffer) },
       { 
         caption: style.id === 'none' 
           ? `🖼️ "${session.prompt}"`
@@ -186,7 +180,6 @@ bot.action(/generate_(\w+)/, async (ctx) => {
     );
 
     await ctx.deleteMessage(processingMsg.message_id).catch(console.error);
-    await Deno.remove(tempFile).catch(console.error);
 
   } catch (error) {
     console.error("Generation error:", error);
@@ -194,14 +187,19 @@ bot.action(/generate_(\w+)/, async (ctx) => {
   }
 });
 
-// Start the bot
-console.log("Starting bot...");
-bot.launch()
-  .then(() => console.log("Bot is running"))
-  .catch(err => console.error("Bot failed:", err));
+// Start the bot with webhook if in production
+if (WEBHOOK_URL) {
+  console.log("Starting bot in webhook mode...");
+  bot.telegram.setWebhook(`${WEBHOOK_URL}/bot${botToken}`);
+  bot.startWebhook(`/bot${botToken}`, null, PORT);
+} else {
+  console.log("Starting bot in polling mode...");
+  bot.launch()
+    .then(() => console.log("Bot is running"))
+    .catch(err => console.error("Bot failed:", err));
+}
 
 // Graceful shutdown
-const abortController = new AbortController();
 Deno.addSignalListener("SIGINT", () => {
   console.log("\nShutting down...");
   bot.stop();
